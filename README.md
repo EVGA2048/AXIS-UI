@@ -3,6 +3,24 @@
 A lightweight UI framework for small OLED displays on ESP32.
 Smooth animations, minimal footprint, built for physical interaction.
 
+---
+
+一个跑在小屏幕 OLED 上的 UI 框架，给 ESP32 用的。
+
+起因是做 PRISM 的时候想要顺滑的界面动画，
+写着写着觉得这部分可以单独拿出来，以后做其他带屏幕的设备也能用。
+
+屏幕驱动和框架完全分离，用户自己初始化好屏幕对象，传个指针进来就行，
+换屏幕不需要改框架代码。
+
+屏幕之间可以带方向的滑动过渡，进子页面往左，返回往右，
+drawFn 里把 xOff 加到 x 坐标上，元素就跟着整体滑动。
+
+交互方式是五维摇杆加按键，不打算支持触屏。
+
+还在开发中，API 可能会变。
+
+
 ## Features
 
 - Works with any `Adafruit_GFX` compatible display — pass your own screen object, framework doesn't care about the driver
@@ -65,19 +83,3 @@ https://github.com/EVGA2048/PRISM
 
 MIT
 
----
-
-一个跑在小屏幕 OLED 上的 UI 框架，给 ESP32 用的。
-
-起因是做 PRISM 的时候想要顺滑的界面动画，
-写着写着觉得这部分可以单独拿出来，以后做其他带屏幕的设备也能用。
-
-屏幕驱动和框架完全分离，用户自己初始化好屏幕对象，传个指针进来就行，
-换屏幕不需要改框架代码。
-
-屏幕之间可以带方向的滑动过渡，进子页面往左，返回往右，
-drawFn 里把 xOff 加到 x 坐标上，元素就跟着整体滑动。
-
-交互方式是五维摇杆加按键，不打算支持触屏。
-
-还在开发中，API 可能会变。
