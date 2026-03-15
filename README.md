@@ -71,15 +71,12 @@ https://github.com/EVGA2048/PRISM
 
 MIT
 
-[→ 中文说明](#中文说明)
-
 ---
 
 ## 中文说明                    ← 原来那条分割线下面换成这个标题
 
 [→ Back to English](#axis-ui)
 
-[→ Back to English](#axis-ui)
 
 一个跑在小屏幕 OLED 上的 UI 框架，给 ESP32 用的。
 
