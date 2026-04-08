@@ -8,6 +8,7 @@
  #pragma once
  #include <stdint.h>
  #include <Arduino.h>
+ #include <LovyanGFX.h>
  
  // ═════════════════════════════════════════════════
  //  颜色调色板 — 终端橙黄主题（RGB565）
@@ -119,9 +120,53 @@
      float    tvoc     = 0;      // mg/m³
      bool     valid    = false;  // 数据是否有效
  };
+
+// =================================================
+//  灵动消息栏（HOME 信息区下方）
+// =================================================
+#define AXIS_MAX_TICKER 8
+
+struct AxisTickerItem {
+    char     text[32];
+    uint16_t color;
+    bool     valid;
+};
+
+// =================================================
+//  主页节点
+// =================================================
+#define AXIS_MAX_NODES 8
+
+// 8 个方位坐标偏移（相对节点区域中心），顺序：N NE E SE S SW W NW
+static const int8_t AXIS_NODE_PX[8] = {  0,  20,  26,  20,   0, -20, -26, -20 };
+static const int8_t AXIS_NODE_PY[8] = { -22, -14,   0,  14,  22,  14,   0, -14 };
+
+// 节点区域中心：状态栏 10px + 节点区 58px 的中点 = y=39
+#define AXIS_NODE_CX  64
+#define AXIS_NODE_CY  39
+
+struct AxisNode {
+    char           label[16]      = {};   // 节点名（支持4字中文），信息区大标题用
+    char           shortTag[8]    = {};   // 节点图短标签（ASCII），自动从 label 截取
+    char           description[24]= {};
+    uint16_t       color          = AXIS_C_ACCENT;
+    AxisScreenID   targetScreen   = AXIS_SCR_NONE;
+    AxisTransition transition     = AXIS_TRANS_SLIDE_LEFT;
+    int8_t         posIndex       = 0;   // 0-7: N NE E SE S SW W NW
+    int8_t         parentIdx      = -1;  // -1=HOME，>=0=父节点索引（分组连线用）
+    bool           valid          = false;
+};
+
  
  // ═════════════════════════════════════════════════
- //  WS2812 灯光效果类型
+ //  UI 语言
+ // ═════════════════════════════════════════════════
+ enum AxisLang : uint8_t {
+     AXIS_LANG_EN = 0,   // English
+     AXIS_LANG_ZH = 1,   // 简体中文
+ };
+
+ // WS2812 灯光效果类型
  // ═════════════════════════════════════════════════
  enum AxisLightEffect : uint8_t {
      AXIS_LIGHT_OFF = 0,
@@ -136,12 +181,12 @@
  // ═════════════════════════════════════════════════
  //  回调类型
  // ═════════════════════════════════════════════════
- typedef void (*AxisDrawCallback)(Adafruit_GFX& d,
+ typedef void (*AxisDrawCallback)(LGFX_Sprite& spr,
                                    int16_t xOff, int16_t yOff,
                                    void* userData);
  typedef void (*AxisInputCallback)(AxisInputEvent event,
                                     void* userData);
- typedef void (*AxisStatusCallback)(Adafruit_GFX& d,
+ typedef void (*AxisStatusCallback)(LGFX_Sprite& spr,
                                      void* userData);
  typedef void (*AxisFlushCallback)();
  
