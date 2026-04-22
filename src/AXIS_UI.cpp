@@ -307,6 +307,12 @@ void AXIS_UI::_updateAnimations() {
     _smoothProgress.update();
     _smoothVolume.update();
 
+    // 光标吸附进度动画（snapT 平滑趋向目标）
+    float snapTarget = (_hoveredNode >= 0) ? 1.0f : 0.0f;
+    _snapT = AxisAnim::smoothFollow(_snapT, snapTarget, 0.20f);
+    if (_snapT < 0.01f) _snapT = 0.0f;
+    if (_snapT > 0.99f) _snapT = 1.0f;
+
     if (_notif.active) {
         _notif.slideY = AxisAnim::smoothFollow(_notif.slideY, 1.0f, 0.18f);
         if (now >= _notif.expireAt) { _notif.active = false; _notif.slideY = 0.0f; }
@@ -465,6 +471,10 @@ void AXIS_UI::_renderFrame() {
         _renderTransition();
     } else {
         _renderScreen(_curID, 0, 0);
+        // 光标叠加层：仅在空间屏且光标模式下渲染
+        if (_isSpatialScreen() && _navMode == AXIS_NAVMODE_CURSOR) {
+            _renderCursorOverlay(0, 0);
+        }
         if (_notif.active)       _renderNotifOverlay();
         if (_bubble.active)      _renderBubbleOverlay();
         if (_menuSlide > 0.005f) _renderMenuOverlay();
@@ -974,9 +984,10 @@ void AXIS_UI::_flushSub()  { if (_subFlush) _subFlush(); }
 void AXIS_UI::registerScreen(AxisScreenID id,
                               AxisDrawCallback drawFn,
                               AxisInputCallback inputFn,
-                              void* userData) {
+                              void* userData,
+                              AxisNavType navType) {
     if (_screenCount >= AXIS_MAX_SCREENS) return;
-    _screens[_screenCount++] = {id, drawFn, inputFn, userData, true};
+    _screens[_screenCount++] = {id, drawFn, inputFn, userData, navType, true};
 }
 
 void AXIS_UI::registerInput(AxisScreenID id,
@@ -990,7 +1001,7 @@ void AXIS_UI::registerInput(AxisScreenID id,
         }
     }
     if (_screenCount >= AXIS_MAX_SCREENS) return;
-    _screens[_screenCount++] = {id, nullptr, inputFn, userData, true};
+    _screens[_screenCount++] = {id, nullptr, inputFn, userData, AXIS_NAVTYPE_AUTO, true};
 }
 
 void AXIS_UI::_stackPush(AxisScreenID id) {
@@ -1006,6 +1017,12 @@ void AXIS_UI::goTo(AxisScreenID id, AxisTransition trans) {
     if (id == _curID) return;
     _stackPush(_curID);
     _prevID = _curID;
+    // 切屏时重置光标状态
+    _curVX = _curVY = 0.0f;
+    _snapT = 0.0f;
+    _hoveredNode = -1;
+    _escapeAcc = 0.0f;
+    _discreteAccX = _discreteAccY = 0.0f;
     if (trans == AXIS_TRANS_NONE) {
         _curID = id;
         _spr->fillScreen(AXIS_C_BG);
@@ -1225,8 +1242,221 @@ void AXIS_UI::_homeNodeInput(AxisInputEvent ev) {
 }
 
 // ═════════════════════════════════════════════════
-//  绘图工具
+//  导航模式 / 光标
 // ═════════════════════════════════════════════════
+
+void AXIS_UI::setNavMode(AxisNavMode mode) {
+    _navMode = mode;
+    // 切换模式时重置光标到屏幕中心
+    _curX = (float)mainW() * 0.5f;
+    _curY = (float)mainH() * 0.5f;
+    _curVX = _curVY = 0.0f;
+    _snapT = 0.0f;
+    _hoveredNode = -1;
+    _escapeAcc = 0.0f;
+}
+
+bool AXIS_UI::_isSpatialScreen() const {
+    // HOME 内置屏：强制 SPATIAL
+    if (_curID == AXIS_SCR_HOME) return true;
+    // 查找注册屏幕的 navType
+    for (uint8_t i = 0; i < _screenCount; i++) {
+        if (_screens[i].id == _curID) {
+            if (_screens[i].navType == AXIS_NAVTYPE_SPATIAL)  return true;
+            if (_screens[i].navType == AXIS_NAVTYPE_DISCRETE) return false;
+            break;  // AUTO：跟随全局
+        }
+    }
+    return (_navMode == AXIS_NAVMODE_CURSOR);
+}
+
+void AXIS_UI::moveCursor(int16_t dx, int16_t dy) {
+    _updateCursor(dx, dy);
+}
+
+void AXIS_UI::_updateCursor(int16_t rawDx, int16_t rawDy) {
+    // ── 参数 ────────────────────────────────────────────────────────────────
+    // 迷你轨迹球每次滚动产生脉冲极少（通常1-2个），用速度惯性模型：
+    // 每个脉冲注入速度冲量，速度按帧衰减，光标跟着滑行
+    const float IMPULSE        = 28.0f;  // 每脉冲注入的速度（px/帧）
+    const float FRICTION       = 0.80f;  // 每帧速度保留比例（0=立停 1=永不停）
+    const float MAX_SPEED      = 120.0f; // 最大速度上限（px/帧）
+    const float SNAP_RADIUS    = 28.0f;  // 开始感受引力的距离
+    const float SNAP_PULL      = 0.15f;  // 吸附拉力（每帧向节点移动的比例）
+    const float ESCAPE_THRESH  = 18.0f;  // 脱离所需累积像素
+    const float DISCRETE_THRESH = 1.0f;  // 离散屏触发阈值（脉冲）
+
+    float W = (float)mainW();
+    float H = (float)mainH();
+
+    if (_isSpatialScreen()) {
+        // ── 空间光标：速度惯性模型 ────────────────────────────────────────
+        // 1. 注入速度冲量
+        if (rawDx != 0) _curVX += (float)rawDx * IMPULSE;
+        if (rawDy != 0) _curVY += (float)rawDy * IMPULSE;
+
+        // 2. 速度上限
+        float spd = sqrtf(_curVX*_curVX + _curVY*_curVY);
+        if (spd > MAX_SPEED) {
+            float s = MAX_SPEED / spd;
+            _curVX *= s; _curVY *= s;
+        }
+
+        float mx = _curVX;
+        float my = _curVY;
+
+        // 3. 摩擦衰减
+        _curVX *= FRICTION;
+        _curVY *= FRICTION;
+
+        // 4. 找最近节点
+        int8_t nearest  = -1;
+        float  nearDist = 1e9f;
+        float  nearNx = 0, nearNy = 0;
+        for (uint8_t i = 0; i < _nodeCount; i++) {
+            int16_t nx, ny;
+            _getNodeScreenPos((int8_t)i, nx, ny);
+            float ddx = _curX - (float)nx;
+            float ddy = _curY - (float)ny;
+            float d   = sqrtf(ddx*ddx + ddy*ddy);
+            if (d < nearDist) {
+                nearDist = d; nearest = (int8_t)i;
+                nearNx = (float)nx; nearNy = (float)ny;
+            }
+        }
+
+        bool inSnap = (nearest >= 0 && nearDist < SNAP_RADIUS);
+
+        if (inSnap) {
+            // 吸附区内：判断是否在主动脱离
+            // 脱离方向 = 输入方向与"远离节点方向"同向
+            float awayX = _curX - nearNx;
+            float awayY = _curY - nearNy;
+            float awayLen = sqrtf(awayX*awayX + awayY*awayY);
+
+            bool movingAway = false;
+            if (awayLen > 0.5f && (rawDx != 0 || rawDy != 0)) {
+                float dot = (mx * awayX + my * awayY) / awayLen;
+                if (dot > 0) {
+                    _escapeAcc += dot;
+                    movingAway = true;
+                }
+            }
+
+            if (_escapeAcc >= ESCAPE_THRESH) {
+                // 脱离：正常移动，清除吸附状态
+                _curX += mx;
+                _curY += my;
+                _escapeAcc   = 0.0f;
+                _hoveredNode = -1;
+            } else if (!movingAway) {
+                // 没有主动离开：重置脱离累积，叠加吸附拉力
+                _escapeAcc = 0.0f;
+
+                // 拉力：每帧向节点中心靠近 SNAP_PULL 比例
+                float pullT = SNAP_PULL * (1.0f - nearDist / SNAP_RADIUS);
+                _curX += mx + (nearNx - _curX) * pullT;
+                _curY += my + (nearNy - _curY) * pullT;
+
+                // 更新悬停节点
+                float newDist = sqrtf((_curX-nearNx)*(_curX-nearNx) + (_curY-nearNy)*(_curY-nearNy));
+                if (newDist < SNAP_RADIUS) {
+                    if (_hoveredNode != nearest) {
+                        _hoveredNode   = nearest;
+                        _nodeCursor    = nearest;
+                        _nodeInfoSlide = 1.0f;
+                        _cubeSpinV     = 3.0f;
+                    }
+                } else {
+                    _hoveredNode = -1;
+                }
+            } else {
+                // 主动离开但还没到阈值：正常移动，保持悬停
+                _curX += mx;
+                _curY += my;
+            }
+        } else {
+            // 自由区：直接移动
+            _escapeAcc   = 0.0f;
+            _hoveredNode = -1;
+            _curX += mx;
+            _curY += my;
+        }
+
+        // 边界夹紧
+        _curX = constrain(_curX, 4.0f, W - 4.0f);
+        _curY = constrain(_curY, 4.0f, H - 4.0f);
+
+    } else {
+        // ── 离散屏：增量累积 → 方向事件 ────────────────────────────────────
+        _discreteAccX += (float)rawDx;
+        _discreteAccY += (float)rawDy;
+
+        if (_discreteAccX >  DISCRETE_THRESH) {
+            _injectedInput = AXIS_INPUT_RIGHT; _discreteAccX = 0;
+        } else if (_discreteAccX < -DISCRETE_THRESH) {
+            _injectedInput = AXIS_INPUT_LEFT;  _discreteAccX = 0;
+        }
+        if (_discreteAccY >  DISCRETE_THRESH) {
+            _injectedInput = AXIS_INPUT_DOWN;  _discreteAccY = 0;
+        } else if (_discreteAccY < -DISCRETE_THRESH) {
+            _injectedInput = AXIS_INPUT_UP;    _discreteAccY = 0;
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────
+//  光标叠加层渲染（水珠吸附效果）
+// ─────────────────────────────────────────────────
+void AXIS_UI::_renderCursorOverlay(int16_t xOff, int16_t yOff) {
+    // snapT: 0=自由光标  1=完全吸附到节点
+    int16_t cx = (int16_t)_curX + xOff;
+    int16_t cy = (int16_t)_curY + yOff;
+
+    // ── 节点光晕（吸附时扩散）────────────────────
+    if (_hoveredNode >= 0 && _hoveredNode < (int8_t)_nodeCount) {
+        int16_t nx, ny;
+        _getNodeScreenPos(_hoveredNode, nx, ny);
+        nx += xOff; ny += yOff;
+
+        // 光晕半径：0 → 14px
+        float haloR = _snapT * 14.0f;
+        if (haloR > 0.5f) {
+            uint16_t nodeCol = _nodes[_hoveredNode].color;
+            // 外圈（暗）
+            _spr->drawCircle(nx, ny, (int16_t)(haloR + 2), AXIS_C_DIM);
+            // 内圈（亮，用节点颜色）
+            _spr->drawCircle(nx, ny, (int16_t)haloR, nodeCol);
+        }
+
+        // 脉冲扩散环（锁定瞬间触发，用 _nodeInfoSlide 驱动）
+        if (_snapT > 0.9f && _nodeInfoSlide > 0.05f) {
+            float pulseR = 14.0f + (1.0f - _nodeInfoSlide) * 18.0f;
+            // 颜色随 slide 衰减
+            uint8_t alpha = (uint8_t)(_nodeInfoSlide * 6.0f);  // 0-6 → 亮度级
+            if (alpha > 0) {
+                uint16_t pc = _nodes[_hoveredNode].color;
+                _spr->drawCircle(nx, ny, (int16_t)pulseR, pc);
+            }
+        }
+    }
+
+    // ── 光标圆圈（吸附时收缩消失）────────────────
+    // 自由：r=5 白色实心小圆  吸附中：r 收缩到 0
+    float curR = (1.0f - _snapT) * 5.0f;
+    if (curR > 0.8f) {
+        int16_t r = (int16_t)curR;
+        // 十字准星（轻量，不遮挡内容）
+        uint16_t col = (_hoveredNode >= 0)
+            ? _nodes[_hoveredNode].color
+            : AXIS_C_WHITE;
+        _spr->drawFastHLine(cx - r - 2, cy, r * 2 + 5, col);
+        _spr->drawFastVLine(cx, cy - r - 2, r * 2 + 5, col);
+        // 中心圆点
+        if (r >= 2) _spr->fillCircle(cx, cy, r, col);
+    }
+}
+
 
 void AXIS_UI::drawGradBar(int x, int y, int w, int h,
                            float ratio, uint16_t c1, uint16_t c2,

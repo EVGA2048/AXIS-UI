@@ -22,6 +22,7 @@ struct AxisScreen {
     AxisDrawCallback  drawFn   = nullptr;
     AxisInputCallback inputFn  = nullptr;
     void*             userData = nullptr;
+    AxisNavType       navType  = AXIS_NAVTYPE_AUTO;  // 导航类型
     bool              valid    = false;
 };
 
@@ -96,6 +97,14 @@ public:
     void     setLanguage(AxisLang lang) { _lang = lang; }
     AxisLang language()  const          { return _lang; }
 
+    // ── 导航模式 ──────────────────────────────────
+    void       setNavMode(AxisNavMode mode);
+    AxisNavMode navMode() const { return _navMode; }
+
+    // ── 光标输入（轨迹球等连续输入设备调用）──────
+    // dx/dy 为本帧原始增量（脉冲数），框架内部做物理计算
+    void moveCursor(int16_t dx, int16_t dy);
+
     // ── 屏幕旋转 ──────────────────────────────────
     void setRotation(AxisRotation rot);
     void setJoyRotation(uint8_t rot);  // 仅重映射摇杆方向，不旋转画面
@@ -120,8 +129,9 @@ public:
     // ── 屏幕管理 ─────────────────────────────────
     void registerScreen(AxisScreenID     id,
                         AxisDrawCallback  drawFn,
-                        AxisInputCallback inputFn = nullptr,
-                        void*             userData = nullptr);
+                        AxisInputCallback inputFn  = nullptr,
+                        void*             userData  = nullptr,
+                        AxisNavType       navType   = AXIS_NAVTYPE_AUTO);
 
     // 为内置屏幕（HOME/PLAYER）注册额外输入回调
     void registerInput(AxisScreenID       id,
@@ -213,6 +223,21 @@ private:
 
     // ── 语言 ─────────────────────────────────────
     AxisLang _lang = AXIS_LANG_EN;
+
+    // ── 导航模式 ──────────────────────────────────
+    AxisNavMode _navMode = AXIS_NAVMODE_JOYSTICK;
+
+    // ── 光标状态（CURSOR 模式）────────────────────
+    float   _curX          = 0.0f;    // 光标当前坐标
+    float   _curY          = 0.0f;
+    float   _curVX         = 0.0f;    // 速度
+    float   _curVY         = 0.0f;
+    float   _snapT         = 0.0f;    // 吸附进度 0=自由 1=完全锁定
+    int8_t  _hoveredNode   = -1;      // 当前悬停节点索引（-1=无）
+    float   _escapeAcc     = 0.0f;    // 脱离力累积
+    float   _discreteAccX  = 0.0f;   // DISCRETE 屏累积增量
+    float   _discreteAccY  = 0.0f;
+    bool    _cursorVisible = false;   // 光标是否渲染
 
     // ── 旋转 ─────────────────────────────────────
     AxisRotation _rotation = AXIS_ROT_0;
@@ -335,6 +360,8 @@ private:
 
     // ── 内部方法 ─────────────────────────────────
     void _updateAnimations();
+    void _updateCursor(int16_t dx, int16_t dy);  // 光标物理更新
+    bool _isSpatialScreen() const;               // 当前屏是否用空间光标
     void _handleInput();
     void _checkSensorAlerts();
     void _renderFrame();
@@ -345,6 +372,7 @@ private:
     void _renderBubbleOverlay();
     void _renderSubDisplay();
     void _renderHomeScreen(int16_t xOff, int16_t yOff);
+    void _renderCursorOverlay(int16_t xOff, int16_t yOff); // 光标+光晕叠加层
     void _renderPlayerScreen(int16_t xOff, int16_t yOff);
     void _calcTransOffsets(float progress,
                            int16_t& fromX, int16_t& fromY,
